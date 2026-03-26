@@ -719,27 +719,50 @@ function renderProductCard(name,cat,shopData,thresholds,pinned){
   const card=document.createElement('div');card.className=cls;
   card.innerHTML=`<div class="product-main">
     <span class="product-name">${name}${isCustom?'<span class="custom-tag">added</span>':''}${isPinned?' ⭐':''}</span>
-    <input class="qty-input" value="${qty}" placeholder="qty/kg" onchange="updateQty('${name}',this.value)">
-    <button class="btn-reorder ${reorder?'flagged':''}" onclick="toggleReorder('${name}')"></button>
-    <button class="btn-expand" id="exp-${id}" onclick="toggleDetail('${id}')">▾</button>
+    <input class="qty-input" value="${qty}" placeholder="qty/kg">
+    <button class="btn-reorder ${reorder?'flagged':''}"></button>
+    <button class="btn-expand" id="exp-${id}">▾</button>
   </div>
   <div class="product-detail" id="det-${id}">
-    <div class="detail-row"><span class="detail-label">Notes</span><input class="detail-input" value="${notes.replace(/"/g,'&quot;')}" placeholder="condition, supplier note…" onchange="updateNotes('${name}',this.value)"></div>
+    <div class="detail-row"><span class="detail-label">Notes</span><input class="detail-input" value="${notes.replace(/"/g,'&quot;')}" placeholder="condition, supplier note…"></div>
     <div class="pin-row">
-      <label class="pin-toggle ${isPinned?'pinned':''}"><input type="checkbox" ${isPinned?'checked':''} onchange="togglePin('${name}',this.checked)"> Pin to top</label>
-      ${isCustom?`<button onclick="removeCustom('${name}','${cat}')" style="margin-left:auto;font-size:11px;color:var(--red);background:none;border:none;cursor:pointer">Remove</button>`:''}
+      <label class="pin-toggle ${isPinned?'pinned':''}"><input type="checkbox" ${isPinned?'checked':''}> Pin to top</label>
+      ${isCustom?`<button class="remove-custom-btn" style="margin-left:auto;font-size:11px;color:var(--red);background:none;border:none;cursor:pointer">Remove</button>`:''}
     </div>
   </div>`;
+
+  // Attach all event listeners properly — no inline handlers that can cause re-renders
+  const qtyInput=card.querySelector('.qty-input');
+  const notesInput=card.querySelector('.detail-input');
+  const reorderBtn=card.querySelector('.btn-reorder');
+  const expandBtn=card.querySelector(`#exp-${id}`);
+  const pinCheckbox=card.querySelector('.pin-toggle input');
+  const removeBtn=card.querySelector('.remove-custom-btn');
+
+  // Qty: only save on blur (when user taps away) — never re-renders the list
+  qtyInput.addEventListener('blur',()=>updateQty(name,qtyInput.value));
+  qtyInput.addEventListener('keydown',e=>{if(e.key==='Enter'){qtyInput.blur();}});
+
+  // Notes: save on blur
+  if(notesInput) notesInput.addEventListener('blur',()=>updateNotes(name,notesInput.value));
+
+  // Reorder: update card in-place, no list re-render
+  reorderBtn.addEventListener('click',()=>toggleReorder(name));
+
+  // Expand detail panel
+  expandBtn.addEventListener('click',()=>toggleDetail(id));
+
+  // Pin: defer re-render so it never interrupts typing
+  if(pinCheckbox) pinCheckbox.addEventListener('change',()=>togglePin(name,pinCheckbox.checked));
+
+  // Remove custom
+  if(removeBtn) removeBtn.addEventListener('click',()=>removeCustom(name,cat));
+
   return card;
 }
 
 function renderProductList(){
-  // Preserve focus state before re-render
-  const active=document.activeElement;
-  const focusedName=active?.dataset?.productName||null;
-  const focusedValue=active?.value||null;
   const scrollY=window.scrollY;
-
   const stock=getStock(),key=shopKey(),shopData=stock[key]||{};
   const thresholds=getThresholds(),pinned=getPinned(),all=getAllProducts();
   const container=document.getElementById('product-list');container.innerHTML='';
@@ -751,31 +774,30 @@ function renderProductList(){
     [...prods].sort((a,b)=>(pinned.includes(a)?0:1)-(pinned.includes(b)?0:1)).forEach(name=>section.appendChild(renderProductCard(name,cat,shopData,thresholds,pinned)));
     const cid='cat_'+cat.replace(/[^a-z0-9]/gi,'_');
     const row=document.createElement('div');row.className='add-custom-row';
-    row.innerHTML=`<input class="add-custom-input" id="${cid}" placeholder="Add to ${cat.toLowerCase()}…" style="font-size:12px;padding:7px 10px"><button class="add-custom-btn" style="font-size:12px;padding:7px 12px" onclick="addCustom('${cat}','${cid}')">+ Add</button>`;
+    row.innerHTML=`<input class="add-custom-input" id="${cid}" placeholder="Add to ${cat.toLowerCase()}…" style="font-size:12px;padding:7px 10px"><button class="add-custom-btn" style="font-size:12px;padding:7px 12px">+ Add</button>`;
     const inp=row.querySelector('input');
+    const addBtn=row.querySelector('button');
     inp.addEventListener('keydown',e=>{if(e.key==='Enter')addCustom(cat,cid);});
+    addBtn.addEventListener('click',()=>addCustom(cat,cid));
     section.appendChild(row);container.appendChild(section);
     requestAnimationFrame(()=>{if(inp&&!inp._ac){inp._ac=true;attachAC(inp,'item',v=>{inp.value=v;});}});
   });
-
-  // Restore scroll position
   window.scrollTo(0,scrollY);
   updateSummary();
 }
 
 function toggleDetail(id){document.getElementById('det-'+id).classList.toggle('open');document.getElementById('exp-'+id).classList.toggle('open');}
 
-// Debounce map — prevents re-render kicking user out while typing
 const _qtyTimers={};
+
 function updateQty(name,val){
-  // Save to localStorage immediately (lightweight)
+  // Pure data save — no re-render whatsoever
   const stock=getStock(),key=shopKey();
   if(!stock[key])stock[key]={};
   if(!stock[key][name])stock[key][name]={};
   stock[key][name].qty=val;
   saveStock(stock);
   updateSummary();
-  // Debounce the Supabase push — only fires 1.5s after typing stops
   clearTimeout(_qtyTimers[name]);
   _qtyTimers[name]=setTimeout(()=>pushKey('fp_stock',getStock()),1500);
 }
@@ -795,25 +817,27 @@ function toggleReorder(name){
   if(!stock[key])stock[key]={};
   if(!stock[key][name])stock[key][name]={};
   stock[key][name].reorder=!stock[key][name].reorder;
-  syncedSaveStock(stock);
-  // Update card style in-place — no full re-render
-  const id='p'+name.replace(/[^a-z0-9]/gi,'_');
-  const card=document.querySelector(`[id="exp-${id}"]`)?.closest('.product-card');
-  const btn=document.querySelector(`[onclick="toggleReorder('${name.replace(/'/g,"\\'")}')" ]`);
   const reorder=stock[key][name].reorder;
+  syncedSaveStock(stock);
+  // Update card in-place only — zero re-render
+  const id='p'+name.replace(/[^a-z0-9]/gi,'_');
+  const expandBtn=document.getElementById('exp-'+id);
+  const card=expandBtn?.closest('.product-card');
+  const btn=card?.querySelector('.btn-reorder');
   if(card){
     card.classList.toggle('reorder-flagged',reorder);
-    // Re-apply threshold classes only if not reordering
+    card.classList.toggle('threshold-danger',false);
+    card.classList.toggle('threshold-warn',false);
     if(!reorder){
       const t=getThresholds()[name]?parseFloat(getThresholds()[name]):null;
-      const q=parseFloat(stock[key][name].qty||'');
-      card.classList.toggle('threshold-danger',t!==null&&!isNaN(q)&&q<=t*0.5);
-      card.classList.toggle('threshold-warn',t!==null&&!isNaN(q)&&q>t*0.5&&q<=t);
-    } else {
-      card.classList.remove('threshold-danger','threshold-warn');
+      const q=parseFloat((getStock()[shopKey()]?.[name]?.qty)||'');
+      if(t!==null&&!isNaN(q)){
+        card.classList.toggle('threshold-danger',q<=t*0.5);
+        card.classList.toggle('threshold-warn',q>t*0.5&&q<=t);
+      }
     }
   }
-  if(btn){btn.className='btn-reorder'+(reorder?' flagged':'');}
+  if(btn) btn.className='btn-reorder'+(reorder?' flagged':'');
   updateSummary();
 }
 
@@ -822,8 +846,8 @@ function togglePin(name,checked){
   if(checked&&!p.includes(name))p.push(name);
   if(!checked){const i=p.indexOf(name);if(i>-1)p.splice(i,1);}
   savePinned(p);
-  // Only re-render if pinned status changes sort order — defer slightly so input isn't interrupted
-  setTimeout(()=>renderProductList(),100);
+  // Defer re-render so it never fires while keyboard is open
+  setTimeout(()=>renderProductList(),200);
 }
 function updateSummary(){
   const shopData=(getStock()[shopKey()])||{},t=getThresholds(),allNames=Object.values(getAllProducts()).flat();
