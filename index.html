@@ -594,7 +594,6 @@ async function pullAll(){
 }
 
 function startRealtime(url,key){
-  // Use Supabase Realtime via WebSocket
   const wsUrl=url.replace('https://','wss://').replace('http://','ws://')+'/realtime/v1/websocket?apikey='+key+'&vsn=1.0.0';
   try{
     const ws=new WebSocket(wsUrl);
@@ -608,20 +607,37 @@ function startRealtime(url,key){
           const rec=msg.payload?.record||msg.payload?.new;
           if(rec?.key&&rec?.value){
             try{localStorage.setItem(rec.key,rec.value);}catch{}
-            // Re-render affected views
-            if(rec.key==='fp_stock'){renderProductList();renderMasterList();}
-            if(rec.key==='fp_rests'||rec.key==='fp_orders'){renderRestaurantList();renderMasterList();}
-            if(rec.key==='fp_custorders'){renderCalendar();if(selectedCalDay) renderDayPanel(selectedCalDay);}
-            if(rec.key==='fp_waste'){renderWasteList();renderMasterList();}
+            safeRerender(rec.key);
           }
         }
       }catch{}
     };
     ws.onerror=()=>setSyncDot('error');
-    ws.onclose=()=>{setSyncDot('error');setTimeout(()=>startRealtime(url,key),5000);}; // auto reconnect
+    ws.onclose=()=>{setSyncDot('error');setTimeout(()=>startRealtime(url,key),5000);};
     sbRealtime=ws;
     setSyncDot('synced');
   }catch(e){setSyncDot('error');}
+}
+
+// Only re-render if no input is currently focused — otherwise wait until user finishes
+let _rerenderQueue={};
+function safeRerender(dataKey){
+  const active=document.activeElement;
+  const isTyping=active&&(active.tagName==='INPUT'||active.tagName==='TEXTAREA');
+  if(isTyping){
+    // Queue the re-render — fire 1s after user finishes typing
+    clearTimeout(_rerenderQueue[dataKey]);
+    _rerenderQueue[dataKey]=setTimeout(()=>doRerender(dataKey),1000);
+  } else {
+    doRerender(dataKey);
+  }
+}
+
+function doRerender(dataKey){
+  if(dataKey==='fp_stock'){renderProductList();renderMasterList();}
+  if(dataKey==='fp_rests'||dataKey==='fp_orders'){renderRestaurantList();renderMasterList();}
+  if(dataKey==='fp_custorders'){renderCalendar();if(selectedCalDay)renderDayPanel(selectedCalDay);}
+  if(dataKey==='fp_waste'){renderWasteList();renderMasterList();}
 }
 
 // Wrapped save functions that also push to Supabase
@@ -708,7 +724,7 @@ function renderProductCard(name,cat,shopData,thresholds,pinned){
     <button class="btn-expand" id="exp-${id}" onclick="toggleDetail('${id}')">▾</button>
   </div>
   <div class="product-detail" id="det-${id}">
-    <div class="detail-row"><span class="detail-label">Notes</span><input class="detail-input" value="${notes.replace(/"/g,'&quot;')}" placeholder="condition, supplier note…" oninput="updateNotes('${name}',this.value)"></div>
+    <div class="detail-row"><span class="detail-label">Notes</span><input class="detail-input" value="${notes.replace(/"/g,'&quot;')}" placeholder="condition, supplier note…" onchange="updateNotes('${name}',this.value)"></div>
     <div class="pin-row">
       <label class="pin-toggle ${isPinned?'pinned':''}"><input type="checkbox" ${isPinned?'checked':''} onchange="togglePin('${name}',this.checked)"> Pin to top</label>
       ${isCustom?`<button onclick="removeCustom('${name}','${cat}')" style="margin-left:auto;font-size:11px;color:var(--red);background:none;border:none;cursor:pointer">Remove</button>`:''}
@@ -718,6 +734,12 @@ function renderProductCard(name,cat,shopData,thresholds,pinned){
 }
 
 function renderProductList(){
+  // Preserve focus state before re-render
+  const active=document.activeElement;
+  const focusedName=active?.dataset?.productName||null;
+  const focusedValue=active?.value||null;
+  const scrollY=window.scrollY;
+
   const stock=getStock(),key=shopKey(),shopData=stock[key]||{};
   const thresholds=getThresholds(),pinned=getPinned(),all=getAllProducts();
   const container=document.getElementById('product-list');container.innerHTML='';
@@ -735,6 +757,9 @@ function renderProductList(){
     section.appendChild(row);container.appendChild(section);
     requestAnimationFrame(()=>{if(inp&&!inp._ac){inp._ac=true;attachAC(inp,'item',v=>{inp.value=v;});}});
   });
+
+  // Restore scroll position
+  window.scrollTo(0,scrollY);
   updateSummary();
 }
 
