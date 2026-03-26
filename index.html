@@ -703,7 +703,7 @@ function renderProductCard(name,cat,shopData,thresholds,pinned){
   const card=document.createElement('div');card.className=cls;
   card.innerHTML=`<div class="product-main">
     <span class="product-name">${name}${isCustom?'<span class="custom-tag">added</span>':''}${isPinned?' ⭐':''}</span>
-    <input class="qty-input" value="${qty}" placeholder="qty/kg" onchange="updateQty('${name}',this.value)" oninput="updateQty('${name}',this.value)">
+    <input class="qty-input" value="${qty}" placeholder="qty/kg" onchange="updateQty('${name}',this.value)">
     <button class="btn-reorder ${reorder?'flagged':''}" onclick="toggleReorder('${name}')"></button>
     <button class="btn-expand" id="exp-${id}" onclick="toggleDetail('${id}')">▾</button>
   </div>
@@ -739,10 +739,67 @@ function renderProductList(){
 }
 
 function toggleDetail(id){document.getElementById('det-'+id).classList.toggle('open');document.getElementById('exp-'+id).classList.toggle('open');}
-function updateQty(name,val){const stock=getStock(),key=shopKey();if(!stock[key])stock[key]={};if(!stock[key][name])stock[key][name]={};stock[key][name].qty=val;syncedSaveStock(stock);updateSummary();}
-function updateNotes(name,val){const stock=getStock(),key=shopKey();if(!stock[key])stock[key]={};if(!stock[key][name])stock[key][name]={};stock[key][name].notes=val;syncedSaveStock(stock);}
-function toggleReorder(name){const stock=getStock(),key=shopKey();if(!stock[key])stock[key]={};if(!stock[key][name])stock[key][name]={};stock[key][name].reorder=!stock[key][name].reorder;syncedSaveStock(stock);renderProductList();}
-function togglePin(name,checked){const p=getPinned();if(checked&&!p.includes(name))p.push(name);if(!checked){const i=p.indexOf(name);if(i>-1)p.splice(i,1);}savePinned(p);renderProductList();}
+
+// Debounce map — prevents re-render kicking user out while typing
+const _qtyTimers={};
+function updateQty(name,val){
+  // Save to localStorage immediately (lightweight)
+  const stock=getStock(),key=shopKey();
+  if(!stock[key])stock[key]={};
+  if(!stock[key][name])stock[key][name]={};
+  stock[key][name].qty=val;
+  saveStock(stock);
+  updateSummary();
+  // Debounce the Supabase push — only fires 1.5s after typing stops
+  clearTimeout(_qtyTimers[name]);
+  _qtyTimers[name]=setTimeout(()=>pushKey('fp_stock',getStock()),1500);
+}
+
+function updateNotes(name,val){
+  const stock=getStock(),key=shopKey();
+  if(!stock[key])stock[key]={};
+  if(!stock[key][name])stock[key][name]={};
+  stock[key][name].notes=val;
+  saveStock(stock);
+  clearTimeout(_qtyTimers['notes_'+name]);
+  _qtyTimers['notes_'+name]=setTimeout(()=>pushKey('fp_stock',getStock()),1500);
+}
+
+function toggleReorder(name){
+  const stock=getStock(),key=shopKey();
+  if(!stock[key])stock[key]={};
+  if(!stock[key][name])stock[key][name]={};
+  stock[key][name].reorder=!stock[key][name].reorder;
+  syncedSaveStock(stock);
+  // Update card style in-place — no full re-render
+  const id='p'+name.replace(/[^a-z0-9]/gi,'_');
+  const card=document.querySelector(`[id="exp-${id}"]`)?.closest('.product-card');
+  const btn=document.querySelector(`[onclick="toggleReorder('${name.replace(/'/g,"\\'")}')" ]`);
+  const reorder=stock[key][name].reorder;
+  if(card){
+    card.classList.toggle('reorder-flagged',reorder);
+    // Re-apply threshold classes only if not reordering
+    if(!reorder){
+      const t=getThresholds()[name]?parseFloat(getThresholds()[name]):null;
+      const q=parseFloat(stock[key][name].qty||'');
+      card.classList.toggle('threshold-danger',t!==null&&!isNaN(q)&&q<=t*0.5);
+      card.classList.toggle('threshold-warn',t!==null&&!isNaN(q)&&q>t*0.5&&q<=t);
+    } else {
+      card.classList.remove('threshold-danger','threshold-warn');
+    }
+  }
+  if(btn){btn.className='btn-reorder'+(reorder?' flagged':'');}
+  updateSummary();
+}
+
+function togglePin(name,checked){
+  const p=getPinned();
+  if(checked&&!p.includes(name))p.push(name);
+  if(!checked){const i=p.indexOf(name);if(i>-1)p.splice(i,1);}
+  savePinned(p);
+  // Only re-render if pinned status changes sort order — defer slightly so input isn't interrupted
+  setTimeout(()=>renderProductList(),100);
+}
 function updateSummary(){
   const shopData=(getStock()[shopKey()])||{},t=getThresholds(),allNames=Object.values(getAllProducts()).flat();
   let logged=0,warns=0,reorders=0;
@@ -1266,30 +1323,30 @@ function renderWasteList(){
     div.className='waste-item'+(val?' has-waste':'');
     div.innerHTML=`<span class="waste-name">${name}</span>
       <input class="waste-input" value="${val}" placeholder="0" type="text"
-        oninput="updateWaste('${name}',this.value)" onchange="updateWaste('${name}',this.value)">
+        onchange="updateWaste('${name}',this.value)">
       <span class="waste-unit">kg/units</span>`;
     container.appendChild(div);
   });
 }
 
 function updateWaste(name,val){
-  const waste=getWaste();
-  const key=wasteKey();
+  const waste=getWaste(),key=wasteKey();
   if(!waste[key])waste[key]={};
   if(!val||val==='0') delete waste[key][name];
   else waste[key][name]=val;
-  syncedSaveWaste(waste);
-  // Re-render to show red highlight
+  saveWaste(waste);
+  // Update highlight in-place only
   const container=document.getElementById('waste-list');
   if(container){
-    const items=container.querySelectorAll('.waste-item');
-    items.forEach(item=>{
+    container.querySelectorAll('.waste-item').forEach(item=>{
       const inp=item.querySelector('.waste-input');
       if(inp&&inp.value&&inp.value!=='0') item.classList.add('has-waste');
       else item.classList.remove('has-waste');
     });
   }
-  renderMasterList();
+  // Debounce push and master re-render
+  clearTimeout(_qtyTimers['waste_'+name]);
+  _qtyTimers['waste_'+name]=setTimeout(()=>{pushKey('fp_waste',getWaste());renderMasterList();},1500);
 }
 
 function clearWaste(){
